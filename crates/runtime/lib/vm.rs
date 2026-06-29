@@ -1236,6 +1236,17 @@ fn build_vm(
         #[cfg(not(target_os = "linux"))]
         let raw_tap: Option<microsandbox_network::config::RawTapConfig> = None;
 
+        // Raw-unixgram mode (macOS only): bridge the guest NIC to an external
+        // vmnet helper over a Unix datagram socket (vfkit framing). The helper
+        // runs vmnet SHARED/NAT, so the guest gets real outbound L3 (`nmap -sS`,
+        // ICMP echo) without the restricted vmnet entitlement. Like RawTap this
+        // bypasses the smoltcp stack. Selected by config (`NetworkMode::RawUnixgram`)
+        // or the `MSB_RAWNET_UNIXGRAM` env override.
+        #[cfg(target_os = "macos")]
+        let raw_unixgram = microsandbox_network::raw::resolve_unixgram(&vm.network.mode);
+        #[cfg(not(target_os = "macos"))]
+        let raw_unixgram: Option<microsandbox_network::config::RawUnixgramConfig> = None;
+
         if let Some(raw) = raw_tap {
             #[cfg(target_os = "linux")]
             {
@@ -1258,6 +1269,35 @@ fn build_vm(
                 let _ = raw;
                 return Err(RuntimeError::Custom(
                     "raw-tap networking is only supported on Linux".to_string(),
+                ));
+            }
+        } else if let Some(raw) = raw_unixgram {
+            #[cfg(target_os = "macos")]
+            {
+                let guest_mac = microsandbox_network::raw::guest_mac(vm.sandbox_slot);
+                let mtu = vm.network.interface.mtu.unwrap_or(1500);
+                for (key, value) in
+                    microsandbox_network::raw::guest_env_vars_unixgram(&raw, guest_mac, mtu)
+                {
+                    exec_env.push(format!("{key}={value}"));
+                }
+                let socket_path = raw.socket_path.clone();
+                let send_vfkit_magic = raw.send_vfkit_magic;
+                tracing::info!(
+                    socket = %socket_path.display(),
+                    guest = %raw.guest_ipv4,
+                    gateway = %raw.gateway_ipv4,
+                    vfkit = send_vfkit_magic,
+                    "raw-unixgram (vmnet) networking enabled (smoltcp stack bypassed)"
+                );
+                builder =
+                    builder.net(move |n| n.mac(guest_mac).unixgram_path(socket_path, send_vfkit_magic));
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = raw;
+                return Err(RuntimeError::Custom(
+                    "raw-unixgram networking is only supported on macOS".to_string(),
                 ));
             }
         } else {

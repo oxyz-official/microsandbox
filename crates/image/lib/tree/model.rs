@@ -531,14 +531,27 @@ impl FileTree {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_total_size: DEFAULT_MAX_TOTAL_SIZE,
-            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            // The total/per-file extract caps are overridable via env so large
+            // images (e.g. a full Kali toolchain that unpacks past the 10 GiB
+            // default) can be pulled without recompiling. Values are bytes.
+            max_total_size: env_byte_limit("MSB_MAX_TOTAL_SIZE", DEFAULT_MAX_TOTAL_SIZE),
+            max_file_size: env_byte_limit("MSB_MAX_FILE_SIZE", DEFAULT_MAX_FILE_SIZE),
             max_entry_count: DEFAULT_MAX_ENTRY_COUNT,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
             max_path_depth: DEFAULT_MAX_PATH_DEPTH,
             max_symlink_target: DEFAULT_MAX_SYMLINK_TARGET,
         }
     }
+}
+
+/// Read a positive byte limit from `key`, falling back to `fallback` when the
+/// variable is unset, empty, non-numeric, or zero.
+fn env_byte_limit(key: &str, fallback: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(fallback)
 }
 
 impl Default for InodeMetadata {

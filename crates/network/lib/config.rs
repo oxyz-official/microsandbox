@@ -4,6 +4,7 @@
 //! for sandbox networking. Designed for the smoltcp in-process engine.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,17 @@ pub enum NetworkMode {
     /// secret injection do not apply. The host TAP and its NAT/forwarding rules
     /// must already exist; this mode only attaches the guest NIC to them.
     RawTap(RawTapConfig),
+
+    /// macOS only. Bridge the guest NIC to an external vmnet helper
+    /// (`vmnet-helper`/`socket_vmnet`) over a Unix datagram socket using the
+    /// vfkit framing. The helper holds vmnet privilege and runs SHARED/NAT mode,
+    /// so the guest gets real outbound L3 (working `nmap -sS` and ICMP echo)
+    /// WITHOUT the restricted `com.apple.vm.networking` entitlement. Like RawTap
+    /// this BYPASSES the smoltcp stack and all of its controls. Because vmnet
+    /// SHARED is itself a NAT, raw-IP/TTL tooling (traceroute, hping3, non-echo
+    /// ICMP, stateless masscan) is degraded — use RawTap on Linux for full
+    /// fidelity. The helper and its socket must already be running.
+    RawUnixgram(RawUnixgramConfig),
 }
 
 impl Default for NetworkMode {
@@ -133,6 +145,64 @@ impl Default for RawTapConfig {
             dns: default_raw_dns(),
         }
     }
+}
+
+/// Settings for [`NetworkMode::RawUnixgram`] (macOS vmnet helper).
+///
+/// The guest addressing defaults to the standard vmnet SHARED subnet
+/// (`192.168.105.0/24`, gateway `.1`); override these to match the actual range
+/// your vmnet helper hands out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawUnixgramConfig {
+    /// Path to the vmnet helper's Unix datagram socket.
+    #[serde(default = "default_unixgram_socket")]
+    pub socket_path: PathBuf,
+
+    /// Emit the vfkit "magic" handshake after connecting. Required by
+    /// `vmnet-helper`/`gvproxy` vfkit-mode endpoints. Default: true.
+    #[serde(default = "default_true")]
+    pub send_vfkit_magic: bool,
+
+    /// Static IPv4 address assigned to the guest interface (within the vmnet subnet).
+    #[serde(default = "default_vmnet_guest_ipv4")]
+    pub guest_ipv4: Ipv4Addr,
+
+    /// vmnet gateway address used as the guest's default route.
+    #[serde(default = "default_vmnet_gateway_ipv4")]
+    pub gateway_ipv4: Ipv4Addr,
+
+    /// Prefix length for the vmnet subnet (e.g. 24 for a /24).
+    #[serde(default = "default_raw_prefix")]
+    pub prefix: u8,
+
+    /// DNS resolver handed to the guest (written to the guest's resolv.conf).
+    #[serde(default = "default_raw_dns")]
+    pub dns: Ipv4Addr,
+}
+
+impl Default for RawUnixgramConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: default_unixgram_socket(),
+            send_vfkit_magic: true,
+            guest_ipv4: default_vmnet_guest_ipv4(),
+            gateway_ipv4: default_vmnet_gateway_ipv4(),
+            prefix: default_raw_prefix(),
+            dns: default_raw_dns(),
+        }
+    }
+}
+
+fn default_unixgram_socket() -> PathBuf {
+    PathBuf::from("/tmp/msb-vmnet.sock")
+}
+
+fn default_vmnet_guest_ipv4() -> Ipv4Addr {
+    Ipv4Addr::new(192, 168, 105, 2)
+}
+
+fn default_vmnet_gateway_ipv4() -> Ipv4Addr {
+    Ipv4Addr::new(192, 168, 105, 1)
 }
 
 /// Optional overrides for the guest interface.

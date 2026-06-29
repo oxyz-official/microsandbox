@@ -18,7 +18,10 @@
 
 use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4};
 
-use crate::config::{NetworkMode, RawTapConfig};
+use std::net::Ipv4Addr;
+use std::path::PathBuf;
+
+use crate::config::{NetworkMode, RawTapConfig, RawUnixgramConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -44,8 +47,55 @@ pub fn resolve(mode: &NetworkMode) -> Option<RawTapConfig> {
     }
     match mode {
         NetworkMode::RawTap(cfg) => Some(cfg.clone()),
-        NetworkMode::Smoltcp => None,
+        NetworkMode::Smoltcp | NetworkMode::RawUnixgram(_) => None,
     }
+}
+
+/// Env var that force-enables raw-unixgram (macOS vmnet) mode at runtime. Its
+/// value is the path to the vmnet helper's Unix datagram socket. Optional
+/// companions tune addressing: `MSB_RAWNET_GUEST_IP`, `MSB_RAWNET_GATEWAY`,
+/// `MSB_RAWNET_PREFIX`, `MSB_RAWNET_DNS`, and `MSB_RAWNET_VFKIT` (0/1).
+pub const ENV_RAWNET_UNIXGRAM: &str = "MSB_RAWNET_UNIXGRAM";
+
+/// Resolve the active raw-unixgram config, if any. The `MSB_RAWNET_UNIXGRAM`
+/// env override takes precedence over the declarative [`NetworkMode`] in config.
+pub fn resolve_unixgram(mode: &NetworkMode) -> Option<RawUnixgramConfig> {
+    if let Some(cfg) = unixgram_env_override() {
+        return Some(cfg);
+    }
+    match mode {
+        NetworkMode::RawUnixgram(cfg) => Some(cfg.clone()),
+        NetworkMode::Smoltcp | NetworkMode::RawTap(_) => None,
+    }
+}
+
+/// Read a raw-unixgram override from the environment, returning `Some` only when
+/// `MSB_RAWNET_UNIXGRAM` is set to a non-empty socket path.
+pub fn unixgram_env_override() -> Option<RawUnixgramConfig> {
+    let socket = std::env::var(ENV_RAWNET_UNIXGRAM)
+        .ok()
+        .filter(|s| !s.is_empty())?;
+
+    let mut cfg = RawUnixgramConfig {
+        socket_path: PathBuf::from(socket),
+        ..RawUnixgramConfig::default()
+    };
+    if let Some(v) = env_parse("MSB_RAWNET_GUEST_IP") {
+        cfg.guest_ipv4 = v;
+    }
+    if let Some(v) = env_parse("MSB_RAWNET_GATEWAY") {
+        cfg.gateway_ipv4 = v;
+    }
+    if let Some(v) = env_parse("MSB_RAWNET_PREFIX") {
+        cfg.prefix = v;
+    }
+    if let Some(v) = env_parse("MSB_RAWNET_DNS") {
+        cfg.dns = v;
+    }
+    if let Some(v) = env_parse::<u8>("MSB_RAWNET_VFKIT") {
+        cfg.send_vfkit_magic = v != 0;
+    }
+    Some(cfg)
 }
 
 /// Read a raw-TAP override from the environment, returning `Some` only when
@@ -83,8 +133,30 @@ pub fn guest_mac(slot: u64) -> [u8; 6] {
 }
 
 /// Build the `MSB_NET*` env vars that tell the guest `agentd` its interface,
-/// static IPv4 address, default-route gateway, and DNS resolver for raw mode.
+/// static IPv4 address, default-route gateway, and DNS resolver for raw-TAP mode.
 pub fn guest_env_vars(cfg: &RawTapConfig, mac: [u8; 6], mtu: u16) -> Vec<(String, String)> {
+    guest_net_env(cfg.guest_ipv4, cfg.prefix, cfg.gateway_ipv4, cfg.dns, mac, mtu)
+}
+
+/// Build the `MSB_NET*` env vars for raw-unixgram (macOS vmnet) mode.
+pub fn guest_env_vars_unixgram(
+    cfg: &RawUnixgramConfig,
+    mac: [u8; 6],
+    mtu: u16,
+) -> Vec<(String, String)> {
+    guest_net_env(cfg.guest_ipv4, cfg.prefix, cfg.gateway_ipv4, cfg.dns, mac, mtu)
+}
+
+/// Shared `MSB_NET*` builder for the raw modes (both bypass smoltcp and hand the
+/// guest a static address, default route, and DNS).
+fn guest_net_env(
+    guest_ipv4: Ipv4Addr,
+    prefix: u8,
+    gateway_ipv4: Ipv4Addr,
+    dns: Ipv4Addr,
+    mac: [u8; 6],
+    mtu: u16,
+) -> Vec<(String, String)> {
     let mac_str = format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -98,10 +170,7 @@ pub fn guest_env_vars(cfg: &RawTapConfig, mac: [u8; 6], mtu: u16) -> Vec<(String
         (ENV_HOST_ALIAS.to_string(), crate::HOST_ALIAS.to_string()),
         (
             ENV_NET_IPV4.to_string(),
-            format!(
-                "addr={}/{},gw={},dns={}",
-                cfg.guest_ipv4, cfg.prefix, cfg.gateway_ipv4, cfg.dns
-            ),
+            format!("addr={guest_ipv4}/{prefix},gw={gateway_ipv4},dns={dns}"),
         ),
     ]
 }

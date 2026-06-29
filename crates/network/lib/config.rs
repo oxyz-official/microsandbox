@@ -66,6 +66,73 @@ pub struct NetworkConfig {
     /// this is explicitly enabled. Default: false.
     #[serde(default)]
     pub trust_host_cas: bool,
+
+    /// How the guest NIC is bridged to the host network. Default: smoltcp
+    /// (the in-process userspace stack with policy/DNS/TLS controls).
+    #[serde(default)]
+    pub mode: NetworkMode,
+}
+
+/// How the guest NIC is bridged to the host network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum NetworkMode {
+    /// Default. Bridge the guest NIC to the in-process smoltcp userspace stack
+    /// (egress policy, DNS interception, TLS-MITM secret injection). Because
+    /// connections terminate at L4 and are re-originated from host sockets,
+    /// raw/half-open scans (`nmap -sS`, masscan, raw ICMP) are NOT possible.
+    Smoltcp,
+
+    /// Linux only. Bridge the guest NIC directly to a pre-provisioned host TAP
+    /// device. The guest gets true raw L3 egress — `nmap -sS`, masscan, ICMP,
+    /// traceroute — because its own kernel owns the guest IP. This BYPASSES the
+    /// smoltcp stack entirely, so egress policy, DNS interception, and TLS-MITM
+    /// secret injection do not apply. The host TAP and its NAT/forwarding rules
+    /// must already exist; this mode only attaches the guest NIC to them.
+    RawTap(RawTapConfig),
+}
+
+impl Default for NetworkMode {
+    fn default() -> Self {
+        NetworkMode::Smoltcp
+    }
+}
+
+/// Settings for [`NetworkMode::RawTap`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawTapConfig {
+    /// Name of the pre-provisioned host TAP device to attach the guest NIC to.
+    #[serde(default = "default_tap_name")]
+    pub tap_name: String,
+
+    /// Static IPv4 address assigned to the guest interface.
+    #[serde(default = "default_raw_guest_ipv4")]
+    pub guest_ipv4: Ipv4Addr,
+
+    /// Host-side gateway — the address assigned to the TAP on the host, used as
+    /// the guest's default route.
+    #[serde(default = "default_raw_gateway_ipv4")]
+    pub gateway_ipv4: Ipv4Addr,
+
+    /// Prefix length for the raw subnet (e.g. 24 for a /24).
+    #[serde(default = "default_raw_prefix")]
+    pub prefix: u8,
+
+    /// DNS resolver handed to the guest (written to the guest's resolv.conf).
+    #[serde(default = "default_raw_dns")]
+    pub dns: Ipv4Addr,
+}
+
+impl Default for RawTapConfig {
+    fn default() -> Self {
+        Self {
+            tap_name: default_tap_name(),
+            guest_ipv4: default_raw_guest_ipv4(),
+            gateway_ipv4: default_raw_gateway_ipv4(),
+            prefix: default_raw_prefix(),
+            dns: default_raw_dns(),
+        }
+    }
 }
 
 /// Optional overrides for the guest interface.
@@ -166,6 +233,7 @@ impl Default for NetworkConfig {
             secrets: SecretsConfig::default(),
             max_connections: None,
             trust_host_cas: false,
+            mode: NetworkMode::Smoltcp,
         }
     }
 }
@@ -194,6 +262,26 @@ fn default_host_bind() -> IpAddr {
 
 fn default_query_timeout_ms() -> u64 {
     5000
+}
+
+fn default_tap_name() -> String {
+    "msbtap0".to_string()
+}
+
+fn default_raw_guest_ipv4() -> Ipv4Addr {
+    Ipv4Addr::new(10, 0, 42, 2)
+}
+
+fn default_raw_gateway_ipv4() -> Ipv4Addr {
+    Ipv4Addr::new(10, 0, 42, 1)
+}
+
+fn default_raw_prefix() -> u8 {
+    24
+}
+
+fn default_raw_dns() -> Ipv4Addr {
+    Ipv4Addr::new(1, 1, 1, 1)
 }
 
 #[cfg(test)]

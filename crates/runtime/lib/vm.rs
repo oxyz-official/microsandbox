@@ -1226,38 +1226,76 @@ fn build_vm(
     // Network.
     #[cfg(feature = "net")]
     if vm.network.enabled {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        vm.network
-            .secrets
-            .validate()
-            .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
+        // Raw-TAP mode (Linux only): bridge the guest NIC straight to a
+        // pre-provisioned host TAP for true raw L3 egress (nmap -sS, masscan,
+        // ICMP, traceroute). This bypasses the smoltcp stack entirely, so its
+        // policy/DNS/TLS-MITM controls do not apply. Selected by config
+        // (`NetworkMode::RawTap`) or the `MSB_RAWNET_TAP` env override.
+        #[cfg(target_os = "linux")]
+        let raw_tap = microsandbox_network::raw::resolve(&vm.network.mode);
+        #[cfg(not(target_os = "linux"))]
+        let raw_tap: Option<microsandbox_network::config::RawTapConfig> = None;
 
-        let mut network =
-            microsandbox_network::network::SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot);
-        network_termination_handle = Some(network.termination_handle());
-        network_metrics_handle = Some(network.metrics_handle());
-
-        network.start(tokio_handle.clone());
-
-        let guest_mac = network.guest_mac();
-        let net_backend = network.take_backend();
-
-        {
-            let tls_dir = config.runtime_dir.join("tls");
-            let _ = std::fs::create_dir_all(&tls_dir);
-            if let Some(ca_pem) = network.ca_cert_pem() {
-                let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+        if let Some(raw) = raw_tap {
+            #[cfg(target_os = "linux")]
+            {
+                let guest_mac = microsandbox_network::raw::guest_mac(vm.sandbox_slot);
+                let mtu = vm.network.interface.mtu.unwrap_or(1500);
+                for (key, value) in microsandbox_network::raw::guest_env_vars(&raw, guest_mac, mtu) {
+                    exec_env.push(format!("{key}={value}"));
+                }
+                let tap_name = raw.tap_name.clone();
+                tracing::info!(
+                    tap = %tap_name,
+                    guest = %raw.guest_ipv4,
+                    gateway = %raw.gateway_ipv4,
+                    "raw-tap networking enabled (smoltcp stack bypassed)"
+                );
+                builder = builder.net(move |n| n.mac(guest_mac).tap(tap_name));
             }
-            if let Some(host_cas_pem) = network.host_cas_cert_pem() {
-                let _ = std::fs::write(tls_dir.join("host-cas.pem"), &host_cas_pem);
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = raw;
+                return Err(RuntimeError::Custom(
+                    "raw-tap networking is only supported on Linux".to_string(),
+                ));
             }
-        }
+        } else {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            vm.network
+                .secrets
+                .validate()
+                .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
 
-        for (key, value) in network.guest_env_vars() {
-            exec_env.push(format!("{key}={value}"));
-        }
+            let mut network = microsandbox_network::network::SmoltcpNetwork::new(
+                vm.network.clone(),
+                vm.sandbox_slot,
+            );
+            network_termination_handle = Some(network.termination_handle());
+            network_metrics_handle = Some(network.metrics_handle());
 
-        builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
+            network.start(tokio_handle.clone());
+
+            let guest_mac = network.guest_mac();
+            let net_backend = network.take_backend();
+
+            {
+                let tls_dir = config.runtime_dir.join("tls");
+                let _ = std::fs::create_dir_all(&tls_dir);
+                if let Some(ca_pem) = network.ca_cert_pem() {
+                    let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+                }
+                if let Some(host_cas_pem) = network.host_cas_cert_pem() {
+                    let _ = std::fs::write(tls_dir.join("host-cas.pem"), &host_cas_pem);
+                }
+            }
+
+            for (key, value) in network.guest_env_vars() {
+                exec_env.push(format!("{key}={value}"));
+            }
+
+            builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
+        }
     }
 
     // Execution configuration.

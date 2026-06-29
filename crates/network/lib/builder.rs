@@ -7,7 +7,10 @@ use std::path::PathBuf;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 
-use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
+use crate::config::{
+    DnsConfig, InterfaceOverrides, NetworkConfig, NetworkMode, PortProtocol, PublishedPort,
+    RawTapConfig,
+};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
 use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
@@ -83,6 +86,20 @@ impl NetworkBuilder {
     /// Enable or disable networking.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.config.enabled = enabled;
+        self
+    }
+
+    /// Select how the guest NIC is bridged to the host (smoltcp vs raw-TAP).
+    pub fn mode(mut self, mode: NetworkMode) -> Self {
+        self.config.mode = mode;
+        self
+    }
+
+    /// Convenience for [`NetworkMode::RawTap`]: bridge the guest NIC directly to
+    /// a pre-provisioned host TAP for raw L3 egress (Linux only). Bypasses the
+    /// smoltcp stack and all of its policy/DNS/TLS controls.
+    pub fn raw_tap(mut self, config: RawTapConfig) -> Self {
+        self.config.mode = NetworkMode::RawTap(config);
         self
     }
 

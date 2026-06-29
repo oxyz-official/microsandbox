@@ -22,6 +22,7 @@ pub mod network;
 pub mod policy;
 pub mod proxy;
 pub mod publisher;
+pub mod raw;
 pub mod secrets;
 pub mod shared;
 pub mod stack;
